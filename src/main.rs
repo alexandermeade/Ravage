@@ -9,6 +9,7 @@ mod game;
 mod game_config;
 mod map_gen;
 mod util;
+mod game_object;
 
 #[macroquad::main("Top Down Movement")]
 async fn main() -> Result<()> {
