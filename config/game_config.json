@@ -1,7 +1,10 @@
 {
     "player_sprite": "./assets/steve-32x.png",
+    "terrain_sprite": "./assets/terrain-Sheet.png",
     "virtual_dim": {
-        "width": 320.0, 
-        "height": 180.0
-    }
+        "width": 640.0, 
+        "height": 360.0
+    },
+    "map_height": 20,
+    "map_width": 20
 }
