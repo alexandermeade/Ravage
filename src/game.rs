@@ -6,8 +6,10 @@ use crate::game_config;
 use crate::map_gen::*;
 use crate::util;
 use crate::game_object::*;
-use std::rc::Rc; 
+use std::rc::Rc;
 use std::cell::RefCell;
+use crate::game_config::Assets;
+
 
 pub struct Game {
     pub render_target: RenderTarget,
@@ -15,11 +17,12 @@ pub struct Game {
     pub player: Player,
     pub objects: Vec<Rc<RefCell<GameObject>>>,
     pub config: game_config::GameConfig,
-    pub assets: Assets,
+    pub assets: LoadedAssets,
     pub map: GameMap,
 }
 
-pub struct Assets {
+pub struct LoadedAssets {
+    pub player_sprite: Texture2D,
     pub terrain_sprites: Texture2D,
 }
 
@@ -48,7 +51,6 @@ impl Viewport {
 
 impl Game {
     async fn update(&mut self) {
-
         let dt = get_frame_time();
 
         let mut dir = Vec2::ZERO;
@@ -65,11 +67,10 @@ impl Game {
             dir.x += 1.0;
         }
 
-        if dir != Vec2::ZERO {
-            self.player.pos += dir.normalize() * self.player.speed * dt;
-        }
-        let vp = Viewport::current(&self.config);
-        self.camera.target = (self.player.pos + Vec2::new(16.0, 16.0)).round();
+        self.player.game_object.velocity = dir.normalize_or_zero() * self.player.speed;
+        move_and_collide(&mut self.player.game_object, &self.objects, dt);
+
+        self.camera.target = (self.player.game_object.pos + Vec2::new(16.0, 16.0)).round();
     }
 
     async fn render(&mut self) {
@@ -78,25 +79,32 @@ impl Game {
         clear_background(DARKGRAY);
         self.map.render();
         self.player.render();
-               
+
         let half = vec2(self.config.virtual_dim.width, self.config.virtual_dim.height) / 2.0;
         let mouse_world = vp.screen_to_virtual(mouse_position().into()) + self.camera.target - half;
         draw_circle(mouse_world.x, mouse_world.y, 2.0, RED);
 
-        let hovered = (mouse_world / 32.0).floor();
+        let cell_size = self.config.cell_size;
+        let hovered = (mouse_world / cell_size).floor();
         for (y, row) in self.map.cells.iter().enumerate() {
             for (x, _cell) in row.iter().enumerate() {
                 if x as f32 == hovered.x && y as f32 == hovered.y {
-                    draw_rectangle(x as f32 * 32.0, y as f32 * 32.0, 32.0, 32.0,
+                    draw_rectangle(x as f32 * cell_size, y as f32 * cell_size, cell_size, cell_size,
                         Color::new(1.0, 0.0, 0.0, 0.4));
                 }
             }
-        }        
+        }
         let terrain_sprites = &self.assets.terrain_sprites;
-        self.objects.iter().for_each(|obj_ref| obj_ref.borrow().render(terrain_sprites));     
-        let pos = self.player.pos; 
-        draw_text(format!("player pos x: {}, y: {}", pos.x, pos.y), pos.x.round(), pos.y.round(), 12.0, RED);
-        let cell = (mouse_world / 32.0).floor();
+        self.objects.iter().for_each(|obj_ref| obj_ref.borrow().render(terrain_sprites));
+        
+        if self.config.draw_colliders {
+            self.player.game_object.draw_collider();
+        }
+        self.objects.iter().for_each(|obj_ref| obj_ref.borrow().draw_collider());
+
+        let pos = self.player.game_object.pos;
+        draw_text(&format!("player pos x: {}, y: {}", pos.x, pos.y), pos.x.round(), pos.y.round(), 12.0, RED);
+        let cell = (mouse_world / cell_size).floor();
         draw_text(
             &format!(
                 "cell {},{}  map {}x{}  cells {}x{}",
@@ -112,7 +120,7 @@ impl Game {
         );
         set_default_camera();
         clear_background(BLACK);
-        
+
         draw_texture_ex(
             &self.render_target.texture,
             vp.offset.x,
@@ -126,48 +134,54 @@ impl Game {
         );
 
         next_frame().await;
-    }    
-    
-    pub async fn start(config: game_config::GameConfig) -> Result<()> { 
-        let player_texture = util::load_texture_near(&config.player_sprite).await?; 
-        let terrain_texture = util::load_texture_near(&config.terrain_sprite).await?;
+    }
 
+    pub async fn start(config: game_config::GameConfig) -> Result<()> {
         info!("loading render target");
         let render_target = render_target(config.virtual_dim.width as u32, config.virtual_dim.height as u32);
         render_target.texture.set_filter(FilterMode::Nearest);
-        
+
         let mut camera = Camera2D::from_display_rect(Rect::new(0.0, 0.0, config.virtual_dim.width, config.virtual_dim.height));
         camera.render_target = Some(render_target.clone());
-        
+
+        let loaded_assets = config.assets.load_all().await?;
+        let cell_size = config.cell_size;
+
+        let mut player_object = GameObject::new(
+            GameObjectKind::Player,
+            vec2(config.virtual_dim.width / 2.0, config.virtual_dim.height / 2.0),
+        );
+        player_object.set_collider(20.0, 20.0);
+        player_object.collider_offset = vec2(6.0, 10.0);
+        player_object.collider_dim = (cell_size, cell_size);
+
         let player = Player {
-            pos: vec2(config.virtual_dim.width / 2.0, config.virtual_dim.height / 2.0),
-            texture: player_texture,
+            game_object: player_object,
+            texture: loaded_assets.player_sprite.weak_clone(),
             speed: 100.0,
         };
 
         let game_map = GameMap {
             cells: GameMap::generate_grid(config.map_width, config.map_height),
-            sprite_sheet: terrain_texture.weak_clone(),
+            cell_size: config.cell_size,
+            sprite_sheet: loaded_assets.terrain_sprites.weak_clone(),
         };
-        
-        let terrain = GameMap::populate_terrain(&config); 
-        terrain.iter().for_each(|o| info!("obj: {:#?}", o.borrow()));
+
+        let terrain = GameMap::populate_terrain(&config);
+        //terrain.iter().for_each(|o| info!("obj: {:#?}", o.borrow()));
         let mut game = Game {
-            player, 
+            player,
             camera,
             render_target,
-            config, 
+            config,
             map: game_map,
-            objects: terrain, 
-            assets: Assets { 
-                terrain_sprites: terrain_texture, 
-            }
+            objects: terrain,
+            assets: loaded_assets,
         };
         info!("starting game loop");
         loop {
             game.update().await;
             game.render().await;
         }
-        Ok(())
     }
 }
